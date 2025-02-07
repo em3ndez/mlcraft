@@ -1,93 +1,198 @@
-import { set } from 'unchanged';
-import createMd5Hex from './md5Hex.js';
-import { fetchGraphQL } from './graphql.js';
+import { fetchGraphQL } from "./graphql.js";
 
-const sourceQuery = `
-  query ($id: uuid!) {
-    datasources_by_pk(id: $id) {
+const sourceFragment = `
+  id
+  name
+  db_type
+  db_params
+  team_id
+`;
+
+const modelsFragment = `
+  id
+  name
+  code
+`;
+
+const branchesFragment = `
+  id
+  name
+  status
+`;
+
+const membersFragment = `
+  members {
+    id
+    team_id
+    member_roles {
       id
-      name
-      db_type
-      db_params
+      team_role
+      access_list {
+        config
+      }
     }
   }
 `;
 
-const allSchemasQuery = `
-  query ($offset: Int, $limit: Int, $where: dataschemas_bool_exp, $order_by: [dataschemas_order_by!]) {
-    dataschemas (offset: $offset, limit: $limit, where: $where, order_by: $order_by) {
-      id
-      name
-      code
+const versionsFragment = `
+  versions (limit: 1, order_by: {created_at: desc}) {
+    dataschemas {
+      ${modelsFragment}
     }
   }
 `;
 
+const activeBranchModelsFragment = `
+  branches(where: {status: {_eq: active}}) {
+    ${branchesFragment}
+    ${versionsFragment}
+  }
+`;
 
-const upsertSchemaMutation = `
-  mutation ($object: dataschemas_insert_input!) {
-    insert_dataschemas_one(
-      object: $object,
-      on_conflict: {constraint: dataschemas_datasource_id_branch_name_key, update_columns: code}
+const selectedBranchModelsFragment = `
+  branches_by_pk(id: $branchId) {
+    ${branchesFragment}
+    ${versionsFragment}
+  }
+`;
+
+const userQuery = `
+  query ($_or: [users_bool_exp!]) {
+    users(where: {_or: $_or}, limit: 1) {
+      datasources {
+        ${sourceFragment}
+        branches {
+          ${branchesFragment}
+          ${versionsFragment}
+        }
+      }
+      ${membersFragment}
+    }
+  }
+`;
+
+const sourcesQuery = `
+  {
+    datasources {
+      ${sourceFragment}
+      ${activeBranchModelsFragment}
+    }
+  }
+`;
+
+const branchSchemasQuery = `
+  query ($branchId: uuid!) {
+    ${selectedBranchModelsFragment}
+  }
+`;
+
+const upsertVersionMutation = `
+  mutation ($object: versions_insert_input!) {
+    insert_versions_one(
+      object: $object
     ) {
       id
     }
   }
 `;
 
-export const findDataSource = async ({ dataSourceId, authToken }) => {
-  let res = await fetchGraphQL(sourceQuery, { id: dataSourceId }, authToken);
-  res = res?.data?.datasources_by_pk;
+const sqlCredentialsQuery = `
+  query ($username: String!) {
+    sql_credentials(where: {username: {_eq: $username}}) {
+      id
+      user_id
+      user {
+        ${membersFragment}
+      }
+      password
+      username
+      datasource {
+        ${sourceFragment}
+        ${activeBranchModelsFragment}
+      }
+    }
+  }
+`;
+
+const dataschemasQuery = `
+  query GetSchemas($_in: [uuid!]) {
+    dataschemas(where: {id: {_in: $_in}}) {
+      code
+      name
+      id
+    }
+  }
+`;
+
+export const findUser = async ({ userId }) => {
+  const where = {
+    _or: [
+      { id: { _eq: userId } },
+      {
+        members: {
+          team: {
+            members: {
+              user_id: { _eq: userId },
+            },
+          },
+        },
+      },
+    ],
+  };
+
+  const res = await fetchGraphQL(userQuery, {
+    ...where,
+  });
+
+  const dataSources = res?.data?.users?.[0]?.datasources;
+  const members = res?.data?.users?.[0]?.members;
+
+  return {
+    dataSources,
+    members,
+  };
+};
+
+export const findSqlCredentials = async (username) => {
+  const res = await fetchGraphQL(sqlCredentialsQuery, { username });
+  const sqlCredentials = res?.data?.sql_credentials?.[0];
+
+  return sqlCredentials;
+};
+
+export const getDataSources = async () => {
+  let res = await fetchGraphQL(sourcesQuery);
+  res = res?.data?.datasources;
 
   return res;
 };
 
 export const createDataSchema = async (object) => {
-  const { authToken, ...newObject } = object;
+  const { authToken, ...version } = object;
 
-  let res = await fetchGraphQL(upsertSchemaMutation, { object: newObject }, authToken);
-  res = res?.data?.insert_dataschemas_one;
+  let res = await fetchGraphQL(
+    upsertVersionMutation,
+    { object: version },
+    authToken
+  );
+  res = res?.data?.insert_versions_one;
 
   return res;
 };
 
-export const findDataSchemas = async (args) => {
-  let vars = {
-    order_by: {
-      created_at: 'asc',
-    },
-  };
+export const findDataSchemas = async ({ branchId, authToken }) => {
+  const res = await fetchGraphQL(branchSchemasQuery, { branchId }, authToken);
 
-  if (args.dataSourceId) {
-    vars = set('where.datasource_id._eq', args.dataSourceId, vars);
-  }
-
-  if (args.branch) {
-    vars = set('where.branch._eq', args.branch, vars);
-  }
-
-  let dataSchemas = await fetchGraphQL(allSchemasQuery, vars, args.authToken);
-  dataSchemas = dataSchemas?.data?.dataschemas;
+  const dataSchemas =
+    res?.data?.branches_by_pk?.versions?.[0]?.dataschemas || [];
 
   return dataSchemas;
 };
 
-export const dataSchemaFiles = async (args) => {
-  if (!args.dataSourceId) {
-    return [];
-  }
+export const findDataSchemasByIds = async ({ ids }) => {
+  const res = await fetchGraphQL(dataschemasQuery, { _in: ids });
 
-  const schemas = await findDataSchemas(args);
+  const dataSchemas = res?.data?.dataschemas || [];
 
-  return (schemas || []).map(r => ({
-    fileName: r.name,
-    readOnly: true,
-    content: r.code
-  }));
-};
-
-export const getSchemaVersion = async (args) => {
-  const files = await dataSchemaFiles(args);
-
-  return createMd5Hex(files);
+  return dataSchemas;
 };

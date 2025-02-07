@@ -1,4 +1,7 @@
-python3 cli.py hasura cli migrate apply
-python3 cli.py hasura cli seeds apply
+export HASURA_GRAPHQL_ADMIN_SECRET=${HASURA_GRAPHQL_ADMIN_SECRET:-"devsecret"}
 
-python3 cli.py hasura cli metadata apply
+./cli.sh hasura cli "migrate apply --all-databases" --build
+./cli.sh hasura cli "seeds apply --all-databases"
+
+./cli.sh hasura cli "metadata apply"
+./cli.sh hasura cli "metadata reload"

@@ -16,6 +16,12 @@ type Mutation {
   ): CreateTeamOutput
 }
 
+type Mutation {
+  export_data_models(
+    branch_id: String
+  ): ExportDataModelsOutput
+}
+
 type Query {
   fetch_dataset(
     exploration_id: uuid!
@@ -27,6 +33,7 @@ type Query {
 type Query {
   fetch_meta(
     datasource_id: uuid!
+    branch_id: uuid
   ): SourceMetaOutput
 }
 
@@ -39,8 +46,10 @@ type Query {
 type Mutation {
   gen_dataschemas(
     datasource_id: uuid!
+    branch_id: uuid!
     tables: [SourceTable!]!
     overwrite: Boolean
+    format: String
   ): GenSourceSchemaOutput
 }
 
@@ -54,25 +63,46 @@ type Mutation {
   invite_team_member(
     email: String!
     teamId: uuid
+    role: String
+    magicLink: Boolean
   ): InviteTeamMemberOutput
+}
+
+type Query {
+  pre_aggregation_preview(
+    datasource_id: String!
+    pre_aggregation_id: String!
+    table_name: String!
+  ): PreAggregationPreviewOutput
+}
+
+type Query {
+  pre_aggregations(
+    datasource_id: String!
+  ): PreAggregationsOutput
 }
 
 type Mutation {
   run_query(
     datasource_id: uuid!
+    branch_id: uuid
     query: String!
     limit: Int!
   ): RunSourceQueryOutput
 }
 
 type Mutation {
-  validate_datasource(
-    id: uuid!
-  ): ValidateSourceOutput
+  send_test_alert(
+    name: String
+    deliveryType: String!
+    deliveryConfig: json!
+    explorationId: uuid
+  ): SendTestAlertOutput
 }
 
 input SourceTable {
   name: String!
+  schema: String!
 }
 
 input events_create_input {
@@ -102,21 +132,6 @@ type SourceMetaOutput {
 
 type RunSourceQueryOutput {
   result: json
-}
-
-type ValidateSourceSchemaOutput {
-  code: String!
-  message: String
-}
-
-type ValidateSourceSchemasOutput {
-  code: String!
-  message: String
-}
-
-type ValidateSourceOutput {
-  code: String!
-  message: String
 }
 
 type CheckConnectionOutput {
@@ -154,5 +169,22 @@ type GenSQLOutput {
 
 type events_create_mutation_response {
   affected_rows: Int
+}
+
+type ExportDataModelsOutput {
+  download_url: String!
+}
+
+type PreAggregationsOutput {
+  data: json!
+}
+
+type PreAggregationPreviewOutput {
+  data: json!
+}
+
+type SendTestAlertOutput {
+  error: Boolean
+  result: json
 }
 

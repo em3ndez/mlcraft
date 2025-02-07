@@ -1,13 +1,27 @@
-version: '3.8'
+version: "3.8"
+
+networks:
+  synmetrix_default:
+    external: true
 
 services:
+  redis:
+    image: redis:7.0.0
+    ports:
+      - 6379:6379
+    env_file:
+      - .env
+      - .stage.env
+    networks:
+      - synmetrix_default
+
   postgres:
-    image: postgres:12.2
+    image: postgres:${POSTGRES_VERSION}
     deploy:
       placement:
         constraints: [node.role == manager]
     ports:
-       - 5435:5432
+      - 5435:5432
     volumes:
       - pgstorage-data:/var/lib/postgresql/data
       - ./etc/postgres.conf:/var/lib/postgresql/data/postgresql.conf
@@ -15,77 +29,194 @@ services:
       - .env
       - .stage.env
     networks:
-      - mlcraft_default
+      - synmetrix_default
 
-  nginx:
-    image: mesudip/nginx-proxy:latest
+  traefik:
+    image: traefik:v2.5.5
     deploy:
       placement:
         constraints: [node.role == manager]
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.traefik.rule=Host(`lb.${DOMAIN}`) && (PathPrefix(`/api`) || PathPrefix(`/dashboard`))
+        - traefik.http.routers.traefik.entrypoints=websecure
+        - traefik.http.routers.traefik.service=api@internal
+        - traefik.http.routers.traefik.tls=true
+        - traefik.http.routers.traefik.tls.certresolver=myresolver
+        - traefik.http.services.traefik.loadbalancer.server.port=888
+    command:
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.pg_port.address=:15432
+      - --entrypoints.mysql_port.address=:13306
+      - --entrypoints.web.http.redirections.entryPoint.to=websecure
+      - --entrypoints.web.http.redirections.entryPoint.scheme=https
+      - --entrypoints.web.http.redirections.entrypoint.permanent=true
+      - --entrypoints.web.http.redirections.entrypoint.priority=1000
+      - --providers.docker=true
+      - --providers.docker.swarmMode=true
+      - --providers.docker.exposedByDefault=false
+      - --api=true
+      - --api.dashboard=true
+      - --accesslog=true
+      - --certificatesresolvers.myresolver.acme.email=${LETSENCRYPT_EMAIL}
+      - --certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json
+      # used during the challenge
+      - --certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web
+      - --log.level=DEBUG
     ports:
       - 80:80
       - 443:443
+      - 15432:15432
+      - 13306:13306
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - nginx-dhparam:/etc/nginx/dhparam
-      - nginx-ssl:/etc/ssl
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./letsencrypt:/letsencrypt
+    env_file:
+      - .env
+      - .stage.env
     networks:
-      - mlcraft_default
-    environment:
-      CLIENT_MAX_BODY_SIZE: 5m
+      - synmetrix_default
 
   cubejs:
-    image: ${REGISTRY_HOST}/mlcraft/cubejs:latest
+    image: ${REGISTRY_HOST}/synmetrix/cubejs:latest
+    deploy:
+      labels:
+        - traefik.http.routers.cubejs.rule=Host(`cube.${DOMAIN}`)
+        - traefik.http.routers.cubejs.entrypoints=websecure
+        - traefik.http.routers.cubejs.tls=true
+        - traefik.http.routers.cubejs.tls.certresolver=myresolver
+        - traefik.http.services.cubejs.loadbalancer.server.port=4000
+        # pg api
+        - traefik.enable=true
+        - traefik.tcp.routers.pg_api.rule=HostSNI(`*`)
+        - traefik.tcp.routers.pg_api.entrypoints=pg_port
+        - traefik.tcp.routers.pg_api.service=pg_api
+        - traefik.tcp.services.pg_api.loadbalancer.server.port=15432
+        # mysql api
+        - traefik.tcp.routers.mysql_api.rule=HostSNI(`*`)
+        - traefik.tcp.routers.mysql_api.entrypoints=mysql_port
+        - traefik.tcp.routers.mysql_api.service=mysql_api
+        - traefik.tcp.services.mysql_api.loadbalancer.server.port=13306
+    build:
+      context: ./services/cubejs
     command: yarn start
     env_file:
       - .env
       - .stage.env
+    networks:
+      - synmetrix_default
 
   client:
-    image: ${REGISTRY_HOST}/mlcraft/app-client:latest
+    image: ${REGISTRY_HOST}/synmetrix/app-client:latest
     deploy:
       placement:
         constraints: [node.role == manager]
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.client.rule=Host(`app.${DOMAIN}`)
+        - traefik.http.routers.client.entrypoints=websecure
+        - traefik.http.routers.client.tls=true
+        - traefik.http.routers.client.tls.certresolver=myresolver
+        - traefik.http.services.client.loadbalancer.server.port=8888
+        - traefik.http.middlewares.client_compress.compress=true
+        - traefik.http.routers.client.middlewares=client_compress
     build:
       context: ./services/client/
       args:
-        NODE_ENV: test
-    environment:
-      VIRTUAL_HOST: ${PROTOCOL:-http}://app.${DOMAIN} -> :80
-      GRAPHQL_SERVER_URL: ${PROTOCOL:-http}://api.${DOMAIN}/v1/graphql
-      GRAPHQL_WS_URL: ${WS_PROTOCOL:-ws}://api.${DOMAIN}/v1/graphql
-      GRAPHQL_PLUS_SERVER_URL: ${PROTOCOL:-http}://api-plus.${DOMAIN}
+        CLIENT_VERSION: ${CLIENT_VERSION}
+        HASURA_GRAPHQL_ENDPOINT: /v1/graphql
+        HASURA_WS_ENDPOINT: /v1/graphql
+        GRAPHQL_PLUS_SERVER_URL: 
+        CUBEJS_MYSQL_API_URL: cube.${DOMAIN}:13306
+        CUBEJS_PG_API_URL: cube.${DOMAIN}:15432
+        CUBEJS_REST_API_URL: /api/v1/load
+        CUBEJS_API_DOCS_URL: http://cube.${DOMAIN}/docs
     networks:
-      - mlcraft_default
+      - synmetrix_default
 
   hasura:
-    image: ${REGISTRY_HOST}/mlcraft/hasura:latest
+    image: hasura/graphql-engine:${HASURA_VERSION}
+    deploy:
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.hasura.rule=Host(`api.${DOMAIN}`)
+        - traefik.http.routers.hasura.entrypoints=websecure
+        - traefik.http.routers.hasura.tls=true
+        - traefik.http.routers.hasura.tls.certresolver=myresolver
+        - traefik.http.services.hasura.loadbalancer.server.port=8080
     env_file:
       - .env
       - .stage.env
     environment:
-      VIRTUAL_HOST1: ${PROTOCOL:-http}://api.${DOMAIN} -> :8080
-      VIRTUAL_HOST2: ${WS_PROTOCOL:-ws}://api.${DOMAIN} -> :8080
-      HASURA_GRAPHQL_ENABLE_CONSOLE: "true" 
+      HASURA_GRAPHQL_ENABLE_CONSOLE: "true"
+    networks:
+      - synmetrix_default
 
   hasura_plus:
-    image: ${REGISTRY_HOST}/mlcraft/hasura-plus:latest
+    image: ${REGISTRY_HOST}/synmetrix/hasura-plus:latest
+    build:
+      context: ./scripts/containers/hasura-backend-plus
     env_file:
       - .env
       - .stage.env
     environment:
-      VIRTUAL_HOST: ${PROTOCOL:-http}://api-plus.${DOMAIN} -> :3000; client_max_body_size 5m;
-      SERVER_URL: ${PROTOCOL:-http}://api-plus.${DOMAIN}
+      SERVER_URL: ${PROTOCOL:-http}://app.${DOMAIN}
       REDIRECT_URL_SUCCESS: ${PROTOCOL:-http}://app.${DOMAIN}/callback
       REDIRECT_URL_ERROR: ${PROTOCOL:-http}://app.${DOMAIN}/callback
+    networks:
+      - synmetrix_default
 
   actions:
-    image: ${REGISTRY_HOST}/mlcraft/hasura-actions:latest
+    image: ${REGISTRY_HOST}/synmetrix/hasura-actions:latest
+    build:
+      context: ./services/actions/
+    command: yarn start
     env_file:
       - .env
       - .stage.env
+    networks:
+      - synmetrix_default
+
+  cubestore:
+    image: cubejs/cubestore:${CUBESTORE_VERSION}
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    environment:
+      - CUBESTORE_REMOTE_DIR=/cube/data
+    volumes:
+      - cubestore:/cube/data
+    networks:
+      - synmetrix_default
+
+  minio:
+    image: minio/minio:latest
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.minio.rule=Host(`s3.${DOMAIN}`)
+        - traefik.http.routers.minio.entrypoints=websecure
+        - traefik.http.routers.minio.tls=true
+        - traefik.http.routers.minio.tls.certresolver=myresolver
+        - traefik.http.services.minio.loadbalancer.server.port=9000
+    command: server --console-address ":9001" /data
+    volumes:
+      - minio-data:/data
+    env_file:
+      - .env
+      - .stage.env
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - synmetrix_default
 
 volumes:
   pgstorage-data:
-  nginx-dhparam:
-  nginx-ssl:
+  cubestore:
+  minio-data:
